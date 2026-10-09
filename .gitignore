@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+.pytest_cache/
+data/
+.env
+node_modules/
+dist/
+*.egg-info/
+playwright-report/
+test-results/
+*.tsbuildinfo
+.ruff_cache/
