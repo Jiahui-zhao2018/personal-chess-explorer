@@ -7,7 +7,7 @@ game-history imports, master databases, win rates, or paid services.
 
 ## Run locally
 
-Requirements: Bash 4.3+, Python 3.11+ and Node 20.19+, 22.12+, or 24+. Tested here with Python
+Requirements: Bash 3.2+ (no `wait -n` required), Python 3.11+ and Node 20.19+, 22.12+, or 24+. Tested here with Python
 3.12 and Node 24. Use the existing checkout; a separate Git worktree is unnecessary.
 
 ```bash
@@ -16,9 +16,38 @@ bash scripts/dev.sh
 ```
 
 Open `http://127.0.0.1:5173` in your local browser. The backend listens on port 8000;
-Vite proxies `/api` to it. Both servers bind to loopback. Stop them with Ctrl+C.
+Vite proxies `/api` to it. The backend binds to `127.0.0.1:8000`; the frontend
+binds to `0.0.0.0:5173` so the authenticated cloud preview proxy can connect.
+Stop both with Ctrl+C. Set `PCE_DEV_HOST=127.0.0.1` for loopback-only frontend access.
+The startup supervisor uses portable PID polling and single-PID `wait`, not
+`wait -n`. If either service exits, its status is reported and the other is
+stopped. Ctrl+C/SIGTERM stop both; an unresponsive child is killed after a
+five-second grace period. Supervisor regression tests run under Bash and POSIX sh.
 Use **Studies → Add & fetch** to add a study URL or its eight-character ID.
 Public studies work without authentication. No study is imported automatically.
+
+### Cloud web preview
+
+Keep `bash scripts/dev.sh` running and select **port 5173** in the cloud preview.
+If the preview forwards an external Host, start with its exact origin configured:
+
+```bash
+PCE_FRONTEND_ORIGIN=https://your-preview-host.example bash scripts/dev.sh
+```
+
+This permits that hostname in Vite and that origin in the backend. Vite rewrites
+the proxied API Host to the loopback backend with `changeOrigin: true`. Additional
+trusted hostnames can be supplied through `PCE_PREVIEW_HOSTS`; all-host trust is
+not enabled. Use only an authenticated preview: the workspace has no application
+login protecting cached private study data from other visitors. OAuth callback
+configuration remains separate in `PCE_OAUTH_REDIRECT_URI`.
+
+For a blank preview, check that both servers are running, port 5173 is selected,
+and Network shows HTML, `/src/main.tsx`, module assets and `/api/health` returning
+200. An unknown hostname is rejected rather than silently exposing the workspace.
+The regression test `PCE_CHROMIUM_PATH=/usr/bin/chromium npm run test:preview`
+(in `frontend`) exercises the dev server under an external hostname, API editing,
+and continued rejection of untrusted hosts/origins using temporary fixture data.
 
 For a production build served by FastAPI alone:
 
@@ -94,8 +123,8 @@ if you want server-side revocation.
 
 `PCE_DATA_DIR` can point to another private local directory. Ordinary JSON APIs
 require trusted loopback hosts/origins, and mutations require JSON to prevent
-cross-site form submission. Keep the application on loopback and do not add a
-public tunnel. Access logging is disabled by the startup commands so OAuth
+cross-site form submission. Keep the backend on loopback and do not expose the
+frontend through an unauthenticated public tunnel. Access logging is disabled by the startup commands so OAuth
 callback query strings are not recorded.
 
 ## Write-back safety and verified API contract
