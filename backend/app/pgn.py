@@ -24,6 +24,46 @@ CHAPTER_URL = re.compile(
 )
 
 
+class ValidatingGameBuilder(chess.pgn.GameBuilder):
+    """Let python-chess build the tree, validating the original SAN tokens."""
+
+    def __init__(self, san_tokens):
+        super().__init__()
+        self.san_tokens = san_tokens
+
+    def parse_san(self, board, san):
+        # read_game's regex omits check/mate suffixes. The strict lexical pass
+        # keeps them, in the same order that read_game visits moves/variations.
+        original = next(self.san_tokens)
+        label = f"{board.fullmove_number}{'.' if board.turn else '...'} {original}"
+        try:
+            move = board.parse_san(original)
+        except chess.IllegalMoveError as error:
+            raise ValueError(f"Illegal chess move at {label}: {error}") from error
+        except chess.AmbiguousMoveError as error:
+            raise ValueError(f"Ambiguous SAN at {label}: {error}") from error
+        except chess.InvalidMoveError as error:
+            raise ValueError(f"Malformed SAN at {label}: {error}") from error
+        if move not in board.legal_moves:
+            raise ValueError(f"Illegal chess move at {label}")
+        if original.endswith(("+", "#")):
+            result = board.copy()
+            result.push(move)
+            if original.endswith("#") and not result.is_checkmate():
+                raise ValueError(
+                    f"Incorrect checkmate suffix at {label}: move does not give checkmate"
+                )
+            if original.endswith("+") and not result.is_check():
+                raise ValueError(
+                    f"Incorrect check suffix at {label}: move does not give check"
+                )
+        return move
+
+    def handle_error(self, error):
+        # Fail immediately, rather than logging and returning a truncated tree.
+        raise error
+
+
 def parse(text: str) -> list[chess.pgn.Game]:
     if len(text) > 10_000_000:
         raise ValueError("PGN exceeds 10 MB limit")
@@ -32,7 +72,7 @@ def parse(text: str) -> list[chess.pgn.Game]:
         r'^\s*\[[A-Za-z][A-Za-z0-9_]*\s+"(?:[^"\\]|\\.)*"\]\s*$', "", text, flags=re.M
     )
     lex = re.sub(r";[^\n]*|^%[^\n]*", "", lex, flags=re.M)
-    lex = re.sub(r"\{[^}]*\}", "", lex, flags=re.S)
+    lex = re.sub(r"\{[^}]*\}", " ", lex, flags=re.S)
     if "{" in lex or "}" in lex:
         raise ValueError("Unterminated or invalid PGN comment")
     balance = 0
@@ -45,13 +85,29 @@ def parse(text: str) -> list[chess.pgn.Game]:
             raise ValueError("Unbalanced PGN variation")
     if balance:
         raise ValueError("Unbalanced PGN variation")
-    lex = chess.pgn.MOVETEXT_REGEX.sub("", lex)
-    lex = re.sub(r"\d+\.{1,3}|\s+", "", lex)
-    if lex:
-        raise ValueError("Unrecognized or malformed PGN text")
+    san_tokens = []
+    move_number = 1
+    for token_match in re.finditer(r"\d+\.{1,3}|\$\d+|[()!?*]|[^\s()!?*$]+|\$", lex):
+        token = token_match.group()
+        if re.fullmatch(r"\d+\.{1,3}", token):
+            move_number = int(token.split(".")[0])
+            continue
+        # Accept one suffix only on a library-recognized move, never on results
+        # or annotations. Do not remove symbols globally or accept stray '+/#'.
+        base = token[:-1] if token.endswith(("+", "#")) else token
+        match = chess.pgn.MOVETEXT_REGEX.fullmatch(base)
+        if not match or (base != token and not match.group(1)):
+            raise ValueError(f"Malformed PGN syntax near move {move_number}: {token!r}")
+        if match.group(1):
+            san_tokens.append(token)
+    original_sans = iter(san_tokens)
     stream = io.StringIO(text)
     games = []
-    while (game := chess.pgn.read_game(stream)) is not None:
+    while (
+        game := chess.pgn.read_game(
+            stream, Visitor=lambda: ValidatingGameBuilder(original_sans)
+        )
+    ) is not None:
         if game.errors:
             raise ValueError("Invalid PGN: " + str(game.errors[0]))
         if game.headers.get("Variant", "Standard") not in {
